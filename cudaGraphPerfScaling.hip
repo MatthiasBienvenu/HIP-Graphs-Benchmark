@@ -1,0 +1,468 @@
+/* Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *  * Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *  * Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *  * Neither the name of NVIDIA CORPORATION nor the names of its
+ *    contributors may be used to endorse or promote products derived
+ *    from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+ * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+/*
+ * This is a simple application showing the performance characteristics of cudaGraphs.
+ */
+
+//#define USE_ROCTX
+
+#include <cstdio>
+#include <hip/amd_detail/amd_hip_runtime.h>
+#include <hip/hip_runtime.h>
+#include <vector>
+#include <chrono>
+
+typedef volatile int LatchType;
+
+std::chrono::time_point<std::chrono::high_resolution_clock> getCpuTime()
+{
+    return std::chrono::high_resolution_clock::now();
+}
+
+template <typename T>
+float getMicroSecondDuration(T start, T end)
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(end-start).count() *.001f;
+}
+
+float getAsyncMicroSecondDuration(hipEvent_t start, hipEvent_t end)
+{
+    float ms;
+    hipEventElapsedTime(&ms, start, end);
+    return ms*1000;
+}
+
+#ifdef USE_ROCTX
+#include <rocprofiler-sdk-roctx/roctx.h>
+
+class Tracer {
+public:
+    Tracer(const char* name) {
+        roctxRangePushA(name);
+    }
+    ~Tracer() {
+        roctxRangePop();
+    }
+};
+#define RANGE(name) Tracer uniq_name_using_macros(name);
+#define RANGE_PUSH(name) roctxRangePush(name)
+#define RANGE_POP() roctxRangePop()
+#else
+#define RANGE(name)
+#define RANGE_PUSH(name)
+#define RANGE_POP()
+#endif
+
+std::vector<hipStream_t> stream;
+std::vector<hipEvent_t> event;
+hipEvent_t timingEvent[2];
+
+struct hostData {
+    long long timeElapsed;
+    bool timeoutDetected;
+    long long timeElapsed2;
+    bool timeoutDetected2;
+    LatchType latch;
+    LatchType latch2;
+};
+
+struct hostData *hostData;
+
+// Used for AMDGPU to compute durations from number of ticks
+__constant__ int d_wallClockRateKHz;
+
+__global__ void empty()
+{
+}
+
+// Function to read the GPU nanosecond timer in a kernel
+// wallClockRateHz is only used if on AMD GPU because we want nanoseconds but wall_clock64() gives raw ticks
+__device__ __forceinline__ unsigned long long   __globaltimer() {
+    #if defined(__HIP_PLATFORM_AMD__) || defined(__AMDGPU__)
+        return (wall_clock64() * 1000000ULL) / (unsigned long long)d_wallClockRateKHz;
+    #else
+        unsigned long long globaltimer;
+        asm volatile ("mov.u64 %0, %globaltimer;" : "=l"(globaltimer));
+        return globaltimer;
+    #endif
+}
+
+__global__ void delay(long long ticks)
+{
+    long long endTime = clock64() + ticks;
+    while (clock64() < endTime);
+}
+
+__global__ void waitWithTimeout(long long nanoseconds, bool* timeoutDetected, long long *timeElapsed, LatchType* latch)
+{
+    long long startTime = __globaltimer();
+    long long endTime = startTime + nanoseconds;
+    long long time = 0;
+    do {
+        time = __globaltimer();
+    } while (time < endTime && (latch == NULL || *latch == 0));
+    if (timeElapsed != NULL) {
+        *timeElapsed = time - startTime;
+    }
+    if (timeoutDetected) {
+        // report timeout if latch not detected
+        *timeoutDetected = (latch == NULL || *latch == 0);
+    }
+}
+
+__global__ void preUploadAnnotation()
+{
+}
+
+__global__ void postUploadAnnotation()
+{
+}
+
+hipGraph_t createParallelChain(int length, int width, bool singleEntry = false)
+{
+    RANGE_PUSH(__func__);
+    RANGE("capture");
+    hipGraph_t graph;
+    hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal);
+    int streamIdx = 0;
+    if (singleEntry) {
+       empty<<<1,1,0,stream[streamIdx]>>>();
+    }
+
+    hipEventRecord(event[0], stream[0]);
+    for (int i = 1; i < width; i++) {
+        // FIX 1: HIP 5.2 requires explicit 3rd argument for flags (passed 0)
+        hipStreamWaitEvent(stream[i], event[0]);
+    }
+
+    for (int i = 0; i < width; i++) {
+        streamIdx = i;
+        for (int j = 0; j < length; j++) {
+            empty<<<1,1,0,stream[streamIdx]>>>();
+        }
+    }
+
+    for (int i = 1; i < width; i++) {
+        hipEventRecord(event[0], stream[i]);
+        hipStreamWaitEvent(stream[0], event[0]);
+    }
+
+
+    hipStreamEndCapture(stream[0], &graph);
+    return graph;
+}
+
+std::vector<const char*> metricName;
+std::vector<float> metricValue;
+
+int counter2 = 0;
+void runDemo(hipGraph_t graph, int length, int width)
+{
+    hipGraphExec_t graphExec;
+    {
+        auto start = getCpuTime();
+        hipGraphInstantiateWithFlags(&graphExec, graph, 0);
+        auto end = getCpuTime();
+        metricName.push_back("instantiation");
+        metricValue.push_back(getMicroSecondDuration(start, end));
+    }
+    {
+        RANGE("launch including upload");
+        auto start = getCpuTime();
+        hipGraphLaunch(graphExec, stream[0]);
+        auto apiReturn = getCpuTime();
+        hipStreamSynchronize(stream[0]);
+        auto streamSync = getCpuTime();
+        metricName.push_back("first_launch_api");
+        metricValue.push_back(getMicroSecondDuration(start, apiReturn));
+        metricName.push_back("first_launch_total");
+        metricValue.push_back(getMicroSecondDuration(start, streamSync));
+    }
+    {
+        RANGE("repeat lauch in empty stream");
+        auto start = getCpuTime();
+        hipGraphLaunch(graphExec, stream[0]);
+        auto apiReturn = getCpuTime();
+        hipStreamSynchronize(stream[0]);
+        auto streamSync = getCpuTime();
+        metricName.push_back("repeat_launch_api");
+        metricValue.push_back(getMicroSecondDuration(start, apiReturn));
+        metricName.push_back("repeat_launch_total");
+        metricValue.push_back(getMicroSecondDuration(start, streamSync));
+    }
+    {
+        // re-instantiating the exec to simulate first launch into a busy stream.
+        hipGraphExecDestroy(graphExec);
+        hipGraphInstantiateWithFlags(&graphExec, graph, 0);
+
+        long long maxTimeoutNanoSeconds = 4000 + 500*length*width;
+        waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
+
+        RANGE("launch including upload in busy stream");
+        hipEventRecord(timingEvent[0], stream[0]);
+        hipGraphLaunch(graphExec, stream[0]);
+        hipEventRecord(timingEvent[1], stream[0]);
+
+        hostData->latch = 1;
+        hipStreamSynchronize(stream[0]);
+
+        metricName.push_back("first_launch_device");
+        metricValue.push_back(getAsyncMicroSecondDuration(timingEvent[0], timingEvent[1]));
+        metricName.push_back("blockingKernelTimeoutDetected");
+        metricValue.push_back(hostData->timeoutDetected);
+        hostData->latch = 0;
+        hostData->timeoutDetected = 0;
+    }
+    {
+        RANGE("repeat lauch in busy stream");
+        long long maxTimeoutNanoSeconds = 4000 + 500*length*width;
+        waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
+        hipEventRecord(timingEvent[0], stream[0]);
+        hipGraphLaunch(graphExec, stream[0]);
+        hipEventRecord(timingEvent[1], stream[0]);
+
+        hostData->latch = 1;
+        hipStreamSynchronize(stream[0]);
+
+        metricName.push_back("repeat_launch_device");
+        metricValue.push_back(getAsyncMicroSecondDuration(timingEvent[0], timingEvent[1]));
+        metricName.push_back("blockingKernelTimeoutDetected");
+        metricValue.push_back(hostData->timeoutDetected);
+        hostData->latch = 0;
+        hostData->timeoutDetected = 0;
+    }
+    {
+        // re-instantiating the exec to provide upload with work to do.
+        hipGraphExecDestroy(graphExec);
+        hipGraphInstantiateWithFlags(&graphExec, graph, 0);
+        long long maxTimeoutNanoSeconds = 4000 + 1000*length*width;
+        waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected2, &hostData->timeElapsed2, &hostData->latch2);
+        maxTimeoutNanoSeconds = 2000 + 500*length*width;
+        waitWithTimeout<<<1,1,0,stream[1]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
+
+        RANGE("uploading a graph off of the critical path");
+        preUploadAnnotation<<<1,1,0,stream[1]>>>();
+        hipEventRecord(timingEvent[0], stream[0]);
+        auto start = getCpuTime();
+
+        // hipGraphUpload is missing in HIP 5.2
+        // hipGraphLaunch inherently handles upload on ROCm 5.2
+        hipGraphUpload(graphExec, stream[1]);
+
+        auto apiReturn = getCpuTime();
+        hipEventRecord(event[0],stream[1]);
+        hipEventRecord(timingEvent[1], stream[0]);
+        postUploadAnnotation<<<1,1,0,stream[1]>>>();
+
+        hostData->latch = 1; // release the blocking kernel for the upload
+        // FIX 1: HIP 5.2 requires explicit 3rd argument for flags (passed 0)
+        hipStreamWaitEvent(stream[0], event[0]);
+        hipGraphLaunch(graphExec, stream[0]);
+        hipEventSynchronize(event[0]); // upload done, similuate critical path being ready for the graph to run by the release of the second latch
+
+        hostData->latch2 = 1; // release the work
+        hipStreamSynchronize(stream[0]);
+
+        metricName.push_back("upload_api_time");
+        metricValue.push_back(getMicroSecondDuration(start, apiReturn));
+        metricName.push_back("updoad_device_time");
+        metricValue.push_back(getAsyncMicroSecondDuration(timingEvent[0], timingEvent[1]));
+        metricName.push_back("blockingKernelTimeoutDetected");
+        metricValue.push_back(hostData->timeoutDetected);
+
+        hostData->latch = 0;
+        hostData->latch2 = 0;
+        hostData->timeoutDetected = 0;
+        hostData->timeoutDetected2 = 0;
+    }
+    hipGraphExecDestroy(graphExec);
+    hipGraphDestroy(graph);
+    RANGE_POP();
+}
+
+void usage() {
+    printf("programName [outputFmt] [numTrials] [length] [width] [pattern] [stride] [maxLength] \n");
+    printf("\toutputFmt - program output, default=3 (see below)\n");
+    printf("\tnumTrials (per length)\n");
+    printf("\tstarting length of the topology\n");
+    printf("\twidth - width of the graph topology\n");
+    printf("\tpattern - Structure of graph, default=0 (see below)\n");
+    printf("\tstride - how to grow the length between each set of trials \n");
+    printf("\tmaxLength - maximum lenght to try \n");
+    printf("\n");
+    printf("outputFmt can be:\n");
+    printf("\t0: this help message\n");
+    printf("\t1: csv data headers\n");
+    printf("\t2: per trial csv data\n");
+    printf("\t3: csv data & headers\n");
+    printf("\t4: csv data is printed and trials are averaged for each length\n");
+    printf("\t5: csv data is printed and trials are averaged for each length and headers are printed\n");
+    printf("\n");
+    printf("Pattern can be:\n");
+    printf("\t0: No interconnect between branches\n");
+    printf("\t1: Adds an extra root node before the initial fork\n");
+}
+
+int main(int argc, char **argv)
+{
+    if(argc < 1) {
+        usage();
+        return 0;
+    }
+
+    int numTrials=1, length=20, width=1, outputFmt=3, pattern=0, stride = 1;
+    if(argc > 1) outputFmt = atoi(argv[1]);
+    if(argc > 2) numTrials = atoi(argv[2]);
+    if(argc > 3) length= atoi(argv[3]);
+    if(argc > 4) width= atoi(argv[4]);
+    if(argc > 5) pattern = atoi(argv[5]);
+    if(argc > 6) stride = atoi(argv[6]);
+    int maxLength = length;
+    if(argc > 7) maxLength = atoi(argv[7]);
+    if (maxLength < length) {
+        maxLength = length;
+    }
+
+    if((outputFmt & 4) && (outputFmt & 2)) {
+        printf("printing average and all samples doesn't make sense\n");
+    }
+
+    if(length == 0 ||
+       width == 0 ||
+       outputFmt == 0 ||
+       outputFmt > 5 ||
+       pattern > 1)
+    {
+        usage();
+        return 0;
+    }
+
+    bool singleEntry = (pattern == 1);
+
+    hipGraph_t graph;
+
+    hipFree(0);
+
+    #if defined(__HIP_PLATFORM_AMD__) || defined(__AMDGPU__)
+    int wallClockRateKHz = 0;
+    hipDeviceGetAttribute(&wallClockRateKHz, hipDeviceAttributeWallClockRate, 0);;
+    hipMemcpyToSymbol(HIP_SYMBOL(d_wallClockRateKHz), &wallClockRateKHz, sizeof(wallClockRateKHz));
+    #endif
+
+    hipHostMalloc(&hostData, sizeof(*hostData));
+
+    stream.resize(width);
+    for (int i = 0; i < width; i++)
+    {
+        hipStreamCreate(&stream[i]);
+    }
+
+    event.resize(width);
+    for (int i = 0; i < width; i++)
+    {
+        hipEventCreateWithFlags(&event[i], hipEventDisableTiming);
+    }
+
+    // FIX 3: Use hipEventCreateWithFlags when passing flags in HIP 5.2
+    hipEventCreateWithFlags(&event[0], hipEventDisableTiming);
+    hipEventCreate(&timingEvent[0]);
+    hipEventCreate(&timingEvent[1]);
+
+    {
+        RANGE("warmup");
+        for (int i = 0; i < width; i++)
+        {
+            empty<<<1,1,0,stream[i]>>>();
+        }
+        hipStreamSynchronize(stream[0]);
+
+        auto start = getCpuTime();
+        graph = createParallelChain(length, width, singleEntry);
+        auto end = getCpuTime();
+        metricValue.push_back(getMicroSecondDuration(start, end));
+        metricName.push_back("capture");
+        runDemo(graph, length, width);
+    }
+
+    if (outputFmt & 1) {
+        printf("length, width, pattern, ");
+        for (int i = 0; i < metricName.size(); i++) {
+            printf("%s, ", metricName[i]);
+        }
+        printf("\r\n");
+    }
+
+    if (!(outputFmt & 6)) {
+        printf("skipping trials since no output is expected\n");
+        // FIX 4: non-void function 'main' must return value
+        return 0;
+    }
+
+    std::vector<double> metricTotal;
+    metricTotal.resize(metricValue.size());
+
+    while (length <= maxLength) {
+        for (int i = 0; i < numTrials; i++) {
+            metricName.clear();
+            metricValue.clear();
+            auto start = getCpuTime();
+            graph = createParallelChain(length, width, singleEntry);
+            auto end = getCpuTime();
+            metricValue.push_back(getMicroSecondDuration(start, end));
+
+            runDemo(graph, length, width);
+
+            if (outputFmt & 2) {
+                printf("%d, %d, %d, ",length, width, pattern);
+                for (int i = 0; i < metricValue.size(); i++) {
+                    printf("%0.3f, ", metricValue[i]);
+                }
+                printf("\r\n");
+            }
+            if (outputFmt & 4) {
+                for (int i = 0; i < metricTotal.size(); i++) {
+                    metricTotal[i] += metricValue[i];
+                }
+            }
+        }
+
+        if (outputFmt & 4) {
+            printf("%d, %d, %d, ",length, width, pattern);
+            for (int i = 0; i < metricTotal.size(); i++) {
+                printf("%0.3f, ", metricTotal[i]/numTrials);
+                metricTotal[i] = 0;
+            }
+            printf("\r\n");
+        }
+
+        length += stride;
+    }
+
+    printf("\n");
+    return 0;
+}
