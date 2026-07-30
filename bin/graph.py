@@ -74,7 +74,7 @@ def main():
                 yerr=stds[col],
                 marker="x",
                 capsize=3,
-                label=os.path.basename(filename),
+                label=filename,
             )
         ax.set_title(col)
         ax.set_xlabel("length")

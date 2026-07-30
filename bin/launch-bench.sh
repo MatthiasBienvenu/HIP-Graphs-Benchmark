@@ -27,7 +27,11 @@ PATTERN=0
 STRIDE=1
 MAX_LENGTH=2000
 
+echo "Testing a single line graph"
+
 bin/graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >straight-line.csv
+
+echo "Testing a 4 parallel lines graph"
 
 WIDTH=4
 bin/graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >${WIDTH}-parallel-lines.csv
