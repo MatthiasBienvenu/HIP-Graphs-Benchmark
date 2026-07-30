@@ -20,12 +20,12 @@
 # 	1: Adds an extra root node before the initial fork
 
 OUTPUT_FMT=3
-NUM_TRIALS=100
+NUM_TRIALS=10
 LENGTH=1
 WIDTH=1
 PATTERN=0
 STRIDE=1
-MAX_LENGTH=10
+MAX_LENGTH=2000
 
 bin/graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >straight-line.csv
 
