@@ -79,7 +79,7 @@ public:
 #endif
 
 std::vector<hipStream_t> stream;
-std::vector<hipEvent_t> event;
+hipEvent_t event[1];
 hipEvent_t timingEvent[2];
 
 struct hostData {
@@ -377,18 +377,14 @@ int main(int argc, char **argv)
     hipHostMalloc(&hostData, sizeof(*hostData));
 
     stream.resize(width);
+    int numStreams = width;
+    if (numStreams == 1)
+        numStreams = 2; // demo needs two streams even if capture only needs 1.
     for (int i = 0; i < width; i++)
     {
         hipStreamCreate(&stream[i]);
     }
 
-    event.resize(width);
-    for (int i = 0; i < width; i++)
-    {
-        hipEventCreateWithFlags(&event[i], hipEventDisableTiming);
-    }
-
-    // FIX 3: Use hipEventCreateWithFlags when passing flags in HIP 5.2
     hipEventCreateWithFlags(&event[0], hipEventDisableTiming);
     hipEventCreate(&timingEvent[0]);
     hipEventCreate(&timingEvent[1]);
