@@ -32,10 +32,13 @@
 //#define USE_ROCTX
 
 #include <cstdio>
-#include <hip/amd_detail/amd_hip_runtime.h>
 #include <hip/hip_runtime.h>
 #include <vector>
 #include <chrono>
+
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/amd_detail/amd_hip_runtime.h>
+#endif
 
 typedef volatile int LatchType;
 
@@ -103,7 +106,7 @@ __global__ void empty()
 // Function to read the GPU nanosecond timer in a kernel
 // wallClockRateHz is only used if on AMD GPU because we want nanoseconds but wall_clock64() gives raw ticks
 __device__ __forceinline__ unsigned long long   __globaltimer() {
-    #if defined(__HIP_PLATFORM_AMD__) || defined(__AMDGPU__)
+    #ifdef __HIP_PLATFORM_AMD__
         return (wall_clock64() * 1000000ULL) / (unsigned long long)d_wallClockRateKHz;
     #else
         unsigned long long globaltimer;
@@ -290,7 +293,7 @@ void runDemo(hipGraph_t graph, int length, int width)
 
         metricName.push_back("upload_api_time");
         metricValue.push_back(getMicroSecondDuration(start, apiReturn));
-        metricName.push_back("updoad_device_time");
+        metricName.push_back("upload_device_time");
         metricValue.push_back(getAsyncMicroSecondDuration(timingEvent[0], timingEvent[1]));
         metricName.push_back("blockingKernelTimeoutDetected");
         metricValue.push_back(hostData->timeoutDetected);
@@ -368,7 +371,7 @@ int main(int argc, char **argv)
 
     hipFree(0);
 
-    #if defined(__HIP_PLATFORM_AMD__) || defined(__AMDGPU__)
+    #ifdef __HIP_PLATFORM_AMD__
     int wallClockRateKHz = 0;
     hipDeviceGetAttribute(&wallClockRateKHz, hipDeviceAttributeWallClockRate, 0);;
     hipMemcpyToSymbol(HIP_SYMBOL(d_wallClockRateKHz), &wallClockRateKHz, sizeof(wallClockRateKHz));
