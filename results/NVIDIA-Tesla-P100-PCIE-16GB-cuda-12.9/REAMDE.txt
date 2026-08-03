@@ -1,0 +1,5 @@
+Grid5000 Lille chifflot
+
+Specs used:
+- 12 cores Intel Xeon Gold 6126
+- 1 Nvidia Tesla P100 PCIE 16 GB
