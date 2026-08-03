@@ -160,7 +160,7 @@ hipGraph_t createParallelChain(int length, int width, bool singleEntry = false)
     hipEventRecord(event[0], stream[0]);
     for (int i = 1; i < width; i++) {
         // FIX 1: HIP 5.2 requires explicit 3rd argument for flags (passed 0)
-        hipStreamWaitEvent(stream[i], event[0]);
+        hipStreamWaitEvent(stream[i], event[0], 0);
     }
 
     for (int i = 0; i < width; i++) {
@@ -172,7 +172,7 @@ hipGraph_t createParallelChain(int length, int width, bool singleEntry = false)
 
     for (int i = 1; i < width; i++) {
         hipEventRecord(event[0], stream[i]);
-        hipStreamWaitEvent(stream[0], event[0]);
+        hipStreamWaitEvent(stream[0], event[0], 0);
     }
 
 
@@ -284,7 +284,7 @@ void runDemo(hipGraph_t graph, int length, int width)
 
         hostData->latch = 1; // release the blocking kernel for the upload
         // FIX 1: HIP 5.2 requires explicit 3rd argument for flags (passed 0)
-        hipStreamWaitEvent(stream[0], event[0]);
+        hipStreamWaitEvent(stream[0], event[0], 0);
         hipGraphLaunch(graphExec, stream[0]);
         hipEventSynchronize(event[0]); // upload done, similuate critical path being ready for the graph to run by the release of the second latch
 

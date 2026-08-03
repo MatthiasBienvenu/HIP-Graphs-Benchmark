@@ -6,4 +6,4 @@ run: bin/graphPerfScaling
 	bin/launch-bench.sh
 
 bin/graphPerfScaling: src/graphPerfScaling.hip
-	hipcc $^ -o $@
+	hipcc $^ -o $@ -x cu
