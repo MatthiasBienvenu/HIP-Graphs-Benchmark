@@ -159,14 +159,12 @@ hipGraph_t createParallelChain(int length, int width, bool singleEntry = false)
 
     hipEventRecord(event[0], stream[0]);
     for (int i = 1; i < width; i++) {
-        // FIX 1: HIP 5.2 requires explicit 3rd argument for flags (passed 0)
         hipStreamWaitEvent(stream[i], event[0], 0);
     }
 
     for (int i = 0; i < width; i++) {
-        streamIdx = i;
         for (int j = 0; j < length; j++) {
-            empty<<<1,1,0,stream[streamIdx]>>>();
+            empty<<<1,1,0,stream[i]>>>();
         }
     }
 
@@ -379,11 +377,13 @@ int main(int argc, char **argv)
 
     hipHostMalloc(&hostData, sizeof(*hostData));
 
-    stream.resize(width);
     int numStreams = width;
     if (numStreams == 1)
         numStreams = 2; // demo needs two streams even if capture only needs 1.
-    for (int i = 0; i < width; i++)
+
+    stream.resize(numStreams);
+
+    for (int i = 0; i < numStreams; i++)
     {
         hipStreamCreate(&stream[i]);
     }
@@ -394,7 +394,7 @@ int main(int argc, char **argv)
 
     {
         RANGE("warmup");
-        for (int i = 0; i < width; i++)
+        for (int i = 0; i < numStreams; i++)
         {
             empty<<<1,1,0,stream[i]>>>();
         }
