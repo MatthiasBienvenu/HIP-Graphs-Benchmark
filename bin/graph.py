@@ -1,5 +1,4 @@
 import argparse
-import os
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -22,12 +21,18 @@ def parse_args():
         help="Path(s) to the CSV file(s). Provide more than one to compare them on the same graphs.",
     )
     parser.add_argument(
+        "-t",
+        "--transpose",
+        action="store_true",
+        help="Plot one graph per file instead of per column",
+    )
+    parser.add_argument(
         "-c",
         "--columns",
         nargs="+",
-        default=None,
         help="Columns to plot (space separated). If omitted, all default columns are plotted.",
     )
+
     return parser.parse_args()
 
 
@@ -54,33 +59,26 @@ def main():
     data = {}
     for filename in args.filenames:
         means, stds = load_means_stds(filename, columns)
-        if means is None:
-            continue
         data[filename] = (means, stds)
 
-    if not data:
-        print("No valid data to plot.")
-        return
-
-    # one figure per column, one line per file so they can be compared directly
+    axes = {key: plt.subplots()[1] for key in (data if args.transpose else columns)}
     for col in columns:
-        fig, ax = plt.subplots()
         for filename, (means, stds) in data.items():
-            if col not in means.columns:
-                continue
+            ax = axes[filename if args.transpose else col]
             ax.errorbar(
                 means.index,
                 means[col],
                 yerr=stds[col],
                 marker="x",
                 capsize=3,
-                label=filename,
+                label=col if args.transpose else filename,
             )
-        ax.set_title(col)
+
+    for key, ax in axes.items():
+        ax.set_title(key)
         ax.set_xlabel("length")
-        ax.set_ylabel(col)
-        if len(data) > 1:
-            ax.legend()
+        ax.set_ylabel("microseconds")
+        ax.legend()
 
     plt.show()
 
