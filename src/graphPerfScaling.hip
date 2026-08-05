@@ -146,7 +146,7 @@ __global__ void postUploadAnnotation()
 {
 }
 
-hipGraph_t createParallelChain(int length, int width, bool singleEntry = false)
+hipGraph_t createParallelChain(int length, int width, bool singleEntry = false, dim3 blockDim = dim3(1))
 {
     RANGE_PUSH(__func__);
     RANGE("capture");
@@ -154,7 +154,7 @@ hipGraph_t createParallelChain(int length, int width, bool singleEntry = false)
     hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal);
     int streamIdx = 0;
     if (singleEntry) {
-       empty<<<1,1,0,stream[streamIdx]>>>();
+       empty<<<1,blockDim,0,stream[streamIdx]>>>();
     }
 
     hipEventRecord(event[0], stream[0]);
@@ -164,7 +164,7 @@ hipGraph_t createParallelChain(int length, int width, bool singleEntry = false)
 
     for (int i = 0; i < width; i++) {
         for (int j = 0; j < length; j++) {
-            empty<<<1,1,0,stream[i]>>>();
+            empty<<<1,blockDim,0,stream[i]>>>();
         }
     }
 
@@ -182,7 +182,7 @@ std::vector<const char*> metricName;
 std::vector<float> metricValue;
 
 int counter2 = 0;
-void runDemo(hipGraph_t graph, int length, int width)
+void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
 {
     hipGraphExec_t graphExec;
     {
@@ -271,8 +271,6 @@ void runDemo(hipGraph_t graph, int length, int width)
         hipEventRecord(timingEvent[0], stream[0]);
         auto start = getCpuTime();
 
-        // hipGraphUpload is missing in HIP 5.2
-        // hipGraphLaunch inherently handles upload on ROCm 5.2
         hipGraphUpload(graphExec, stream[1]);
 
         auto apiReturn = getCpuTime();
@@ -281,7 +279,6 @@ void runDemo(hipGraph_t graph, int length, int width)
         postUploadAnnotation<<<1,1,0,stream[1]>>>();
 
         hostData->latch = 1; // release the blocking kernel for the upload
-        // FIX 1: HIP 5.2 requires explicit 3rd argument for flags (passed 0)
         hipStreamWaitEvent(stream[0], event[0], 0);
         hipGraphLaunch(graphExec, stream[0]);
         hipEventSynchronize(event[0]); // upload done, similuate critical path being ready for the graph to run by the release of the second latch
@@ -300,6 +297,86 @@ void runDemo(hipGraph_t graph, int length, int width)
         hostData->latch2 = 0;
         hostData->timeoutDetected = 0;
         hostData->timeoutDetected2 = 0;
+    }
+    {
+        RANGE("update a single node on busy stream");
+
+        hipGraphNode_t node;
+        size_t numNodes = 1;
+        hipKernelNodeParams params;
+
+        hipGraphGetNodes(graph, &node, &numNodes);
+        hipGraphKernelNodeGetParams(node, &params);
+
+        params.blockDim = dim3(2);
+
+        auto apiStart = getCpuTime();
+        hipGraphExecKernelNodeSetParams(graphExec, node, &params);
+        auto apiEnd = getCpuTime();
+
+        long long maxTimeoutNanoSeconds = 4000 + 500 * length * width;
+        waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
+
+        hipEventRecord(timingEvent[0], stream[0]);
+        hipGraphLaunch(graphExec, stream[0]);
+        hipEventRecord(timingEvent[1], stream[0]);
+
+        hostData->latch = 1;
+        hipStreamSynchronize(stream[0]);
+
+        metricName.push_back("single_node_update_api");
+        metricValue.push_back(getMicroSecondDuration(apiStart, apiEnd));
+        metricName.push_back("launch_after_single_node_update_device");
+        metricValue.push_back(getAsyncMicroSecondDuration(timingEvent[0], timingEvent[1]));
+        metricName.push_back("blockingKernelTimeoutDetected");
+        metricValue.push_back(hostData->timeoutDetected);
+
+
+        hostData->latch = 0;
+        hostData->timeoutDetected = 0;
+
+        // reset the graph and launch it
+        params.blockDim = dim3(1);
+        hipGraphExecKernelNodeSetParams(graphExec, node, &params);
+        hipGraphLaunch(graphExec, stream[0]);
+        hipStreamSynchronize(stream[0]);
+    }
+    {
+        RANGE("update the full graph on busy stream");
+
+        hipGraph_t graph2 = createParallelChain(length, width, singleEntry, 2);
+        hipGraphNode_t errNode;
+        hipGraphExecUpdateResult result;
+
+        auto apiStart = getCpuTime();
+        hipGraphExecUpdate(graphExec, graph2, &errNode, &result);
+        auto apiEnd = getCpuTime();
+
+        long long maxTimeoutNanoSeconds = 4000 + 500 * length * width;
+        waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
+
+        hipEventRecord(timingEvent[0], stream[0]);
+        hipGraphLaunch(graphExec, stream[0]);
+        hipEventRecord(timingEvent[1], stream[0]);
+
+        hostData->latch = 1;
+        hipStreamSynchronize(stream[0]);
+
+        metricName.push_back("full_graph_update_api");
+        metricValue.push_back(getMicroSecondDuration(apiStart, apiEnd));
+        metricName.push_back("launch_after_full_graph_update_device");
+        metricValue.push_back(getAsyncMicroSecondDuration(timingEvent[0], timingEvent[1]));
+        metricName.push_back("blockingKernelTimeoutDetected");
+        metricValue.push_back(hostData->timeoutDetected);
+
+        hostData->latch = 0;
+        hostData->timeoutDetected = 0;
+
+        // reset the graph and launch it
+        hipGraphDestroy(graph2);
+        hipGraphExecUpdate(graphExec, graph, &errNode, &result);
+        hipGraphLaunch(graphExec, stream[0]);
+        hipStreamSynchronize(stream[0]);
     }
     hipGraphExecDestroy(graphExec);
     hipGraphDestroy(graph);
@@ -405,7 +482,7 @@ int main(int argc, char **argv)
         auto end = getCpuTime();
         metricValue.push_back(getMicroSecondDuration(start, end));
         metricName.push_back("capture");
-        runDemo(graph, length, width);
+        runDemo(graph, length, width, singleEntry);
     }
 
     if (outputFmt & 1) {
@@ -418,7 +495,6 @@ int main(int argc, char **argv)
 
     if (!(outputFmt & 6)) {
         printf("skipping trials since no output is expected\n");
-        // FIX 4: non-void function 'main' must return value
         return 0;
     }
 
@@ -434,7 +510,7 @@ int main(int argc, char **argv)
             auto end = getCpuTime();
             metricValue.push_back(getMicroSecondDuration(start, end));
 
-            runDemo(graph, length, width);
+            runDemo(graph, length, width, singleEntry);
 
             if (outputFmt & 2) {
                 printf("%d, %d, %d, ",length, width, pattern);
