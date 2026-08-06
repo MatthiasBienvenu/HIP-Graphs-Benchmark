@@ -31,6 +31,7 @@
 
 //#define USE_ROCTX
 
+#include <cassert>
 #include <cstdio>
 #include <hip/hip_runtime.h>
 #include <vector>
@@ -99,7 +100,7 @@ struct hostData *hostData;
 // Used for AMDGPU to compute durations from number of ticks
 __constant__ int d_wallClockRateKHz;
 
-__global__ void empty()
+__global__ void empty(int unused)
 {
 }
 
@@ -146,7 +147,7 @@ __global__ void postUploadAnnotation()
 {
 }
 
-hipGraph_t createParallelChain(int length, int width, bool singleEntry = false, dim3 blockDim = dim3(1))
+hipGraph_t createParallelChain(int length, int width, bool singleEntry = false, int kernelArg = 0)
 {
     RANGE_PUSH(__func__);
     RANGE("capture");
@@ -154,7 +155,7 @@ hipGraph_t createParallelChain(int length, int width, bool singleEntry = false, 
     hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal);
     int streamIdx = 0;
     if (singleEntry) {
-       empty<<<1,blockDim,0,stream[streamIdx]>>>();
+       empty<<<1,1,0,stream[streamIdx]>>>(kernelArg);
     }
 
     hipEventRecord(event[0], stream[0]);
@@ -164,7 +165,7 @@ hipGraph_t createParallelChain(int length, int width, bool singleEntry = false, 
 
     for (int i = 0; i < width; i++) {
         for (int j = 0; j < length; j++) {
-            empty<<<1,blockDim,0,stream[i]>>>();
+            empty<<<1,1,0,stream[i]>>>(kernelArg);
         }
     }
 
@@ -304,11 +305,24 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
         hipGraphNode_t node;
         size_t numNodes = 1;
         hipKernelNodeParams params;
+        hipGraphNodeType type;
 
         hipGraphGetNodes(graph, &node, &numNodes);
+
+        // make sure it's a kernel node
+        hipGraphNodeGetType(node, &type);
+
+        assert(type == hipGraphNodeTypeKernel);
+
         hipGraphKernelNodeGetParams(node, &params);
 
-        params.blockDim = dim3(2);
+        // change the argument of a single kernel node to a random value
+        int unused = 42;
+        void *args[] = {
+            &unused
+        };
+
+        params.kernelParams = args;
 
         auto apiStart = getCpuTime();
         hipGraphExecKernelNodeSetParams(graphExec, node, &params);
@@ -336,7 +350,7 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
         hostData->timeoutDetected = 0;
 
         // reset the graph and launch it
-        params.blockDim = dim3(1);
+        unused = 0;
         hipGraphExecKernelNodeSetParams(graphExec, node, &params);
         hipGraphLaunch(graphExec, stream[0]);
         hipStreamSynchronize(stream[0]);
@@ -344,7 +358,8 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
     {
         RANGE("update the full graph on busy stream");
 
-        hipGraph_t graph2 = createParallelChain(length, width, singleEntry, 2);
+        // create a graph with a random argument for the kernel
+        hipGraph_t graph2 = createParallelChain(length, width, singleEntry, -67);
         hipGraphNode_t errNode;
         hipGraphExecUpdateResult result;
 
@@ -473,7 +488,7 @@ int main(int argc, char **argv)
         RANGE("warmup");
         for (int i = 0; i < numStreams; i++)
         {
-            empty<<<1,1,0,stream[i]>>>();
+            empty<<<1,1,0,stream[i]>>>(0);
         }
         hipStreamSynchronize(stream[0]);
 
