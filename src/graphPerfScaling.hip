@@ -32,16 +32,42 @@
 //#define USE_ROCTX
 
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <hip/hip_runtime.h>
+#include <iostream>
+#include <stdexcept>
 #include <vector>
 #include <chrono>
 
 #ifdef __HIP_PLATFORM_AMD__
 #include <hip/amd_detail/amd_hip_runtime.h>
+// Used for AMDGPU to compute durations from number of ticks
+__constant__ int d_wallClockRateKHz;
 #endif
 
+#define HIP_CHECK(expr)                                      \
+    do {                                                     \
+        hipError_t err = (expr);                             \
+        if (err != hipSuccess) {                             \
+            throw std::runtime_error(std::format(            \
+                "{}:{}: {} failed: {}",                      \
+                __FILE__,                                    \
+                __LINE__,                                    \
+                #expr,                                       \
+                hipGetErrorString(err)));                    \
+        }                                                    \
+    } while (false)
+
 typedef volatile int LatchType;
+
+enum class Topology {
+    ParallelChains = 0,
+    ParallelChainsSingleEntry,
+    MeshGraph,
+    MeshGraphSingleEntry,
+    BinaryTree,
+};
 
 std::chrono::time_point<std::chrono::high_resolution_clock> getCpuTime()
 {
@@ -57,7 +83,7 @@ float getMicroSecondDuration(T start, T end)
 float getAsyncMicroSecondDuration(hipEvent_t start, hipEvent_t end)
 {
     float ms;
-    hipEventElapsedTime(&ms, start, end);
+    HIP_CHECK(hipEventElapsedTime(&ms, start, end));
     return ms*1000;
 }
 
@@ -83,7 +109,7 @@ public:
 #endif
 
 std::vector<hipStream_t> stream;
-hipEvent_t event[1];
+std::vector<hipEvent_t> event;
 hipEvent_t timingEvent[2];
 
 struct hostData {
@@ -96,9 +122,6 @@ struct hostData {
 };
 
 struct hostData *hostData;
-
-// Used for AMDGPU to compute durations from number of ticks
-__constant__ int d_wallClockRateKHz;
 
 __global__ void empty(int unused)
 {
@@ -114,12 +137,6 @@ __device__ __forceinline__ unsigned long long   __globaltimer() {
         asm volatile ("mov.u64 %0, %globaltimer;" : "=l"(globaltimer));
         return globaltimer;
     #endif
-}
-
-__global__ void delay(long long ticks)
-{
-    long long endTime = clock64() + ticks;
-    while (clock64() < endTime);
 }
 
 __global__ void waitWithTimeout(long long nanoseconds, bool* timeoutDetected, long long *timeElapsed, LatchType* latch)
@@ -147,20 +164,19 @@ __global__ void postUploadAnnotation()
 {
 }
 
-hipGraph_t createParallelChain(int length, int width, bool singleEntry = false, int kernelArg = 0)
+hipGraph_t createParallelChain(int length, int width, Topology topology, int kernelArg)
 {
-    RANGE_PUSH(__func__);
-    RANGE("capture");
     hipGraph_t graph;
-    hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal);
-    int streamIdx = 0;
-    if (singleEntry) {
-       empty<<<1,1,0,stream[streamIdx]>>>(kernelArg);
+
+    HIP_CHECK(hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal));
+
+    if (topology == Topology::ParallelChainsSingleEntry) {
+       empty<<<1,1,0,stream[0]>>>(kernelArg);
     }
 
-    hipEventRecord(event[0], stream[0]);
+    HIP_CHECK(hipEventRecord(event[0], stream[0]));
     for (int i = 1; i < width; i++) {
-        hipStreamWaitEvent(stream[i], event[0], 0);
+        HIP_CHECK(hipStreamWaitEvent(stream[i], event[0], 0));
     }
 
     for (int i = 0; i < width; i++) {
@@ -170,25 +186,88 @@ hipGraph_t createParallelChain(int length, int width, bool singleEntry = false, 
     }
 
     for (int i = 1; i < width; i++) {
-        hipEventRecord(event[0], stream[i]);
-        hipStreamWaitEvent(stream[0], event[0], 0);
+        HIP_CHECK(hipEventRecord(event[0], stream[i]));
+        HIP_CHECK(hipStreamWaitEvent(stream[0], event[0], 0));
     }
 
 
-    hipStreamEndCapture(stream[0], &graph);
+    HIP_CHECK(hipStreamEndCapture(stream[0], &graph));
     return graph;
+}
+
+hipGraph_t createMeshGraph(unsigned int length, unsigned int width, Topology topology, int kernelArg = 0)
+{
+    hipGraph_t graph;
+
+    HIP_CHECK(hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal));
+
+    if (topology == Topology::MeshGraphSingleEntry) {
+        empty<<<1, 1, 0, stream[0]>>>(0);
+    }
+
+    HIP_CHECK(hipEventRecord(event[0], stream[0]));
+
+    for (int i = 1; i < width; i++) {
+        HIP_CHECK(hipStreamWaitEvent(stream[i], event[0], 0));
+    }
+
+    for (unsigned int l {0}; l < length - 1; l++) {
+        for (unsigned int w {0}; w < width; w++) {
+            empty<<<1, 1, 0, stream[w]>>>(0);
+            HIP_CHECK(hipEventRecord(event[w], stream[w]));
+        }
+
+        for (unsigned int w {0}; w < width; w++) {
+            //hipStreamWaitEvent(stream[w], event[w], 0);
+            HIP_CHECK(hipStreamWaitEvent(stream[(w + 1) % width], event[w], 0));
+        }
+    }
+
+    // last layer has special syncronization
+    if (length >= 1) {
+        for (unsigned int w {0}; w < width; w++) {
+            empty<<<1, 1, 0, stream[w]>>>(0);
+        }
+
+        for (unsigned int w {1}; w < width; w ++) {
+            HIP_CHECK(hipEventRecord(event[0], stream[w]));
+            HIP_CHECK(hipStreamWaitEvent(stream[0], event[0]));
+        }
+    }
+
+    HIP_CHECK(hipStreamEndCapture(stream[0], &graph));
+    return graph;
+}
+
+hipGraph_t createGraph(unsigned int length, unsigned int width, Topology topology, int kernelArg = 0)
+{
+    RANGE_PUSH(__func__);
+    RANGE("capture");
+
+    switch (topology) {
+        case Topology::ParallelChains:
+        case Topology::ParallelChainsSingleEntry:
+            return createParallelChain(length, width, topology, kernelArg);
+        case Topology::MeshGraph:
+        case Topology::MeshGraphSingleEntry:
+            return createMeshGraph(length, width, topology, kernelArg);
+        case Topology::BinaryTree:
+            throw std::logic_error{"Not implemented yet"};
+        default:
+            throw std::logic_error{"Unreachable"};
+    }
 }
 
 std::vector<const char*> metricName;
 std::vector<float> metricValue;
 
 int counter2 = 0;
-void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
+void runDemo(hipGraph_t graph, int length, int width, Topology topology)
 {
     hipGraphExec_t graphExec;
     {
         auto start = getCpuTime();
-        hipGraphInstantiateWithFlags(&graphExec, graph, 0);
+        HIP_CHECK(hipGraphInstantiateWithFlags(&graphExec, graph, 0));
         auto end = getCpuTime();
         metricName.push_back("instantiation");
         metricValue.push_back(getMicroSecondDuration(start, end));
@@ -196,9 +275,9 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
     {
         RANGE("launch including upload");
         auto start = getCpuTime();
-        hipGraphLaunch(graphExec, stream[0]);
+        HIP_CHECK(hipGraphLaunch(graphExec, stream[0]));
         auto apiReturn = getCpuTime();
-        hipStreamSynchronize(stream[0]);
+        HIP_CHECK(hipStreamSynchronize(stream[0]));
         auto streamSync = getCpuTime();
         metricName.push_back("first_launch_api");
         metricValue.push_back(getMicroSecondDuration(start, apiReturn));
@@ -208,9 +287,9 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
     {
         RANGE("repeat lauch in empty stream");
         auto start = getCpuTime();
-        hipGraphLaunch(graphExec, stream[0]);
+        HIP_CHECK(hipGraphLaunch(graphExec, stream[0]));
         auto apiReturn = getCpuTime();
-        hipStreamSynchronize(stream[0]);
+        HIP_CHECK(hipStreamSynchronize(stream[0]));
         auto streamSync = getCpuTime();
         metricName.push_back("repeat_launch_api");
         metricValue.push_back(getMicroSecondDuration(start, apiReturn));
@@ -219,19 +298,19 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
     }
     {
         // re-instantiating the exec to simulate first launch into a busy stream.
-        hipGraphExecDestroy(graphExec);
-        hipGraphInstantiateWithFlags(&graphExec, graph, 0);
+        HIP_CHECK(hipGraphExecDestroy(graphExec));
+        HIP_CHECK(hipGraphInstantiateWithFlags(&graphExec, graph, 0));
 
         long long maxTimeoutNanoSeconds = 4000 + 500*length*width;
         waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
 
         RANGE("launch including upload in busy stream");
-        hipEventRecord(timingEvent[0], stream[0]);
-        hipGraphLaunch(graphExec, stream[0]);
-        hipEventRecord(timingEvent[1], stream[0]);
+        HIP_CHECK(hipEventRecord(timingEvent[0], stream[0]));
+        HIP_CHECK(hipGraphLaunch(graphExec, stream[0]));
+        HIP_CHECK(hipEventRecord(timingEvent[1], stream[0]));
 
         hostData->latch = 1;
-        hipStreamSynchronize(stream[0]);
+        HIP_CHECK(hipStreamSynchronize(stream[0]));
 
         metricName.push_back("first_launch_device");
         metricValue.push_back(getAsyncMicroSecondDuration(timingEvent[0], timingEvent[1]));
@@ -244,12 +323,12 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
         RANGE("repeat lauch in busy stream");
         long long maxTimeoutNanoSeconds = 4000 + 500*length*width;
         waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
-        hipEventRecord(timingEvent[0], stream[0]);
-        hipGraphLaunch(graphExec, stream[0]);
-        hipEventRecord(timingEvent[1], stream[0]);
+        HIP_CHECK(hipEventRecord(timingEvent[0], stream[0]));
+        HIP_CHECK(hipGraphLaunch(graphExec, stream[0]));
+        HIP_CHECK(hipEventRecord(timingEvent[1], stream[0]));
 
         hostData->latch = 1;
-        hipStreamSynchronize(stream[0]);
+        HIP_CHECK(hipStreamSynchronize(stream[0]));
 
         metricName.push_back("repeat_launch_device");
         metricValue.push_back(getAsyncMicroSecondDuration(timingEvent[0], timingEvent[1]));
@@ -260,8 +339,8 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
     }
     {
         // re-instantiating the exec to provide upload with work to do.
-        hipGraphExecDestroy(graphExec);
-        hipGraphInstantiateWithFlags(&graphExec, graph, 0);
+        HIP_CHECK(hipGraphExecDestroy(graphExec));
+        HIP_CHECK(hipGraphInstantiateWithFlags(&graphExec, graph, 0));
         long long maxTimeoutNanoSeconds = 4000 + 1000*length*width;
         waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected2, &hostData->timeElapsed2, &hostData->latch2);
         maxTimeoutNanoSeconds = 2000 + 500*length*width;
@@ -269,23 +348,23 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
 
         RANGE("uploading a graph off of the critical path");
         preUploadAnnotation<<<1,1,0,stream[1]>>>();
-        hipEventRecord(timingEvent[0], stream[0]);
+        HIP_CHECK(hipEventRecord(timingEvent[0], stream[0]));
         auto start = getCpuTime();
 
-        hipGraphUpload(graphExec, stream[1]);
+        HIP_CHECK(hipGraphUpload(graphExec, stream[1]));
 
         auto apiReturn = getCpuTime();
-        hipEventRecord(event[0],stream[1]);
-        hipEventRecord(timingEvent[1], stream[0]);
+        HIP_CHECK(hipEventRecord(event[0],stream[1]));
+        HIP_CHECK(hipEventRecord(timingEvent[1], stream[0]));
         postUploadAnnotation<<<1,1,0,stream[1]>>>();
 
         hostData->latch = 1; // release the blocking kernel for the upload
-        hipStreamWaitEvent(stream[0], event[0], 0);
-        hipGraphLaunch(graphExec, stream[0]);
-        hipEventSynchronize(event[0]); // upload done, similuate critical path being ready for the graph to run by the release of the second latch
+        HIP_CHECK(hipStreamWaitEvent(stream[0], event[0], 0));
+        HIP_CHECK(hipGraphLaunch(graphExec, stream[0]));
+        HIP_CHECK(hipEventSynchronize(event[0])); // upload done, similuate critical path being ready for the graph to run by the release of the second latch
 
         hostData->latch2 = 1; // release the work
-        hipStreamSynchronize(stream[0]);
+        HIP_CHECK(hipStreamSynchronize(stream[0]));
 
         metricName.push_back("upload_api_time");
         metricValue.push_back(getMicroSecondDuration(start, apiReturn));
@@ -307,14 +386,14 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
         hipKernelNodeParams params;
         hipGraphNodeType type;
 
-        hipGraphGetNodes(graph, &node, &numNodes);
+        HIP_CHECK(hipGraphGetNodes(graph, &node, &numNodes));
 
         // make sure it's a kernel node
-        hipGraphNodeGetType(node, &type);
+        HIP_CHECK(hipGraphNodeGetType(node, &type));
 
         assert(type == hipGraphNodeTypeKernel);
 
-        hipGraphKernelNodeGetParams(node, &params);
+        HIP_CHECK(hipGraphKernelNodeGetParams(node, &params));
 
         // change the argument of a single kernel node to a random value
         int unused = 42;
@@ -325,18 +404,18 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
         params.kernelParams = args;
 
         auto apiStart = getCpuTime();
-        hipGraphExecKernelNodeSetParams(graphExec, node, &params);
+        HIP_CHECK(hipGraphExecKernelNodeSetParams(graphExec, node, &params));
         auto apiEnd = getCpuTime();
 
         long long maxTimeoutNanoSeconds = 4000 + 500 * length * width;
         waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
 
-        hipEventRecord(timingEvent[0], stream[0]);
-        hipGraphLaunch(graphExec, stream[0]);
-        hipEventRecord(timingEvent[1], stream[0]);
+        HIP_CHECK(hipEventRecord(timingEvent[0], stream[0]));
+        HIP_CHECK(hipGraphLaunch(graphExec, stream[0]));
+        HIP_CHECK(hipEventRecord(timingEvent[1], stream[0]));
 
         hostData->latch = 1;
-        hipStreamSynchronize(stream[0]);
+        HIP_CHECK(hipStreamSynchronize(stream[0]));
 
         metricName.push_back("single_node_update_api");
         metricValue.push_back(getMicroSecondDuration(apiStart, apiEnd));
@@ -351,31 +430,31 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
 
         // reset the graph and launch it
         unused = 0;
-        hipGraphExecKernelNodeSetParams(graphExec, node, &params);
-        hipGraphLaunch(graphExec, stream[0]);
-        hipStreamSynchronize(stream[0]);
+        HIP_CHECK(hipGraphExecKernelNodeSetParams(graphExec, node, &params));
+        HIP_CHECK(hipGraphLaunch(graphExec, stream[0]));
+        HIP_CHECK(hipStreamSynchronize(stream[0]));
     }
     {
         RANGE("update the full graph on busy stream");
 
         // create a graph with a random argument for the kernel
-        hipGraph_t graph2 = createParallelChain(length, width, singleEntry, -67);
+        hipGraph_t graph2 = createGraph(length, width, topology, -67);
         hipGraphNode_t errNode;
         hipGraphExecUpdateResult result;
 
         auto apiStart = getCpuTime();
-        hipGraphExecUpdate(graphExec, graph2, &errNode, &result);
+        HIP_CHECK(hipGraphExecUpdate(graphExec, graph2, &errNode, &result));
         auto apiEnd = getCpuTime();
 
         long long maxTimeoutNanoSeconds = 4000 + 500 * length * width;
         waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
 
-        hipEventRecord(timingEvent[0], stream[0]);
-        hipGraphLaunch(graphExec, stream[0]);
-        hipEventRecord(timingEvent[1], stream[0]);
+        HIP_CHECK(hipEventRecord(timingEvent[0], stream[0]));
+        HIP_CHECK(hipGraphLaunch(graphExec, stream[0]));
+        HIP_CHECK(hipEventRecord(timingEvent[1], stream[0]));
 
         hostData->latch = 1;
-        hipStreamSynchronize(stream[0]);
+        HIP_CHECK(hipStreamSynchronize(stream[0]));
 
         metricName.push_back("full_graph_update_api");
         metricValue.push_back(getMicroSecondDuration(apiStart, apiEnd));
@@ -388,23 +467,23 @@ void runDemo(hipGraph_t graph, int length, int width, bool singleEntry)
         hostData->timeoutDetected = 0;
 
         // reset the graph and launch it
-        hipGraphDestroy(graph2);
-        hipGraphExecUpdate(graphExec, graph, &errNode, &result);
-        hipGraphLaunch(graphExec, stream[0]);
-        hipStreamSynchronize(stream[0]);
+        HIP_CHECK(hipGraphDestroy(graph2));
+        HIP_CHECK(hipGraphExecUpdate(graphExec, graph, &errNode, &result));
+        HIP_CHECK(hipGraphLaunch(graphExec, stream[0]));
+        HIP_CHECK(hipStreamSynchronize(stream[0]));
     }
-    hipGraphExecDestroy(graphExec);
-    hipGraphDestroy(graph);
+    HIP_CHECK(hipGraphExecDestroy(graphExec));
+    HIP_CHECK(hipGraphDestroy(graph));
     RANGE_POP();
 }
 
 void usage() {
-    printf("programName [outputFmt] [numTrials] [length] [width] [pattern] [stride] [maxLength] \n");
+    printf("programName [outputFmt] [numTrials] [length] [width] [topology] [stride] [maxLength] \n");
     printf("\toutputFmt - program output, default=3 (see below)\n");
     printf("\tnumTrials (per length)\n");
     printf("\tstarting length of the topology\n");
     printf("\twidth - width of the graph topology\n");
-    printf("\tpattern - Structure of graph, default=0 (see below)\n");
+    printf("\ttopology - Structure of graph, default=0 (see below)\n");
     printf("\tstride - how to grow the length between each set of trials \n");
     printf("\tmaxLength - maximum lenght to try \n");
     printf("\n");
@@ -416,9 +495,12 @@ void usage() {
     printf("\t4: csv data is printed and trials are averaged for each length\n");
     printf("\t5: csv data is printed and trials are averaged for each length and headers are printed\n");
     printf("\n");
-    printf("Pattern can be:\n");
-    printf("\t0: No interconnect between branches\n");
-    printf("\t1: Adds an extra root node before the initial fork\n");
+    printf("Topology can be:\n");
+    printf("\t0: ParallelChains. <width> independent parallel lines of size <length> \n");
+    printf("\t1: ParallelChainsSingleEntry. Same as 0 but with a additional root node\n");
+    printf("\t2: MeshGraph. <length> layers of size <width> where each node is connected to 2 nodes in the next layer\n");
+    printf("\t3: MeshGraphSingleEntry. Same as 2 but with a additional root node\n");
+    printf("\t4: BinaryTree of depth <length> (the number of nodes is n*(n+1)/2). Width will be ignored.\n");
 }
 
 int main(int argc, char **argv)
@@ -428,12 +510,12 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    int numTrials=1, length=20, width=1, outputFmt=3, pattern=0, stride = 1;
+    unsigned int numTrials=1, length=20, width=1, outputFmt=3, topo=0, stride = 1;
     if(argc > 1) outputFmt = atoi(argv[1]);
     if(argc > 2) numTrials = atoi(argv[2]);
     if(argc > 3) length= atoi(argv[3]);
     if(argc > 4) width= atoi(argv[4]);
-    if(argc > 5) pattern = atoi(argv[5]);
+    if(argc > 5) topo = atoi(argv[5]);
     if(argc > 6) stride = atoi(argv[6]);
     int maxLength = length;
     if(argc > 7) maxLength = atoi(argv[7]);
@@ -449,40 +531,44 @@ int main(int argc, char **argv)
        width == 0 ||
        outputFmt == 0 ||
        outputFmt > 5 ||
-       pattern > 1)
+       topo > 4)
     {
         usage();
         return 0;
     }
 
-    bool singleEntry = (pattern == 1);
+    auto topology{static_cast<Topology>(topo)};
 
     hipGraph_t graph;
 
-    hipFree(0);
+    HIP_CHECK(hipFree(0));
 
     #ifdef __HIP_PLATFORM_AMD__
     int wallClockRateKHz = 0;
-    hipDeviceGetAttribute(&wallClockRateKHz, hipDeviceAttributeWallClockRate, 0);;
-    hipMemcpyToSymbol(HIP_SYMBOL(d_wallClockRateKHz), &wallClockRateKHz, sizeof(wallClockRateKHz));
+    HIP_CHECK(hipDeviceGetAttribute(&wallClockRateKHz, hipDeviceAttributeWallClockRate, 0));
+    HIP_CHECK(hipMemcpyToSymbol(HIP_SYMBOL(d_wallClockRateKHz), &wallClockRateKHz, sizeof(wallClockRateKHz)));
     #endif
 
-    hipHostMalloc(&hostData, sizeof(*hostData));
+    HIP_CHECK(hipHostMalloc(&hostData, sizeof(*hostData)));
 
     int numStreams = width;
     if (numStreams == 1)
         numStreams = 2; // demo needs two streams even if capture only needs 1.
 
     stream.resize(numStreams);
+    event.resize(width); // may not use the whole size depending on topology
 
     for (int i = 0; i < numStreams; i++)
     {
-        hipStreamCreate(&stream[i]);
+        HIP_CHECK(hipStreamCreate(&stream[i]));
     }
 
-    hipEventCreateWithFlags(&event[0], hipEventDisableTiming);
-    hipEventCreate(&timingEvent[0]);
-    hipEventCreate(&timingEvent[1]);
+    for (int i = 0; i < width; i++) {
+        HIP_CHECK(hipEventCreateWithFlags(&event[i], hipEventDisableTiming));
+    }
+
+    HIP_CHECK(hipEventCreate(&timingEvent[0]));
+    HIP_CHECK(hipEventCreate(&timingEvent[1]));
 
     {
         RANGE("warmup");
@@ -490,14 +576,14 @@ int main(int argc, char **argv)
         {
             empty<<<1,1,0,stream[i]>>>(0);
         }
-        hipStreamSynchronize(stream[0]);
+        HIP_CHECK(hipStreamSynchronize(stream[0]));
 
         auto start = getCpuTime();
-        graph = createParallelChain(length, width, singleEntry);
+        graph = createGraph(length, width, topology);
         auto end = getCpuTime();
         metricValue.push_back(getMicroSecondDuration(start, end));
         metricName.push_back("capture");
-        runDemo(graph, length, width, singleEntry);
+        runDemo(graph, length, width, topology);
     }
 
     if (outputFmt & 1) {
@@ -521,14 +607,14 @@ int main(int argc, char **argv)
             metricName.clear();
             metricValue.clear();
             auto start = getCpuTime();
-            graph = createParallelChain(length, width, singleEntry);
+            graph = createGraph(length, width, topology);
             auto end = getCpuTime();
             metricValue.push_back(getMicroSecondDuration(start, end));
 
-            runDemo(graph, length, width, singleEntry);
+            runDemo(graph, length, width, topology);
 
             if (outputFmt & 2) {
-                printf("%d, %d, %d, ",length, width, pattern);
+                printf("%d, %d, %d, ",length, width, topo);
                 for (int i = 0; i < metricValue.size(); i++) {
                     printf("%0.3f, ", metricValue[i]);
                 }
@@ -542,7 +628,7 @@ int main(int argc, char **argv)
         }
 
         if (outputFmt & 4) {
-            printf("%d, %d, %d, ",length, width, pattern);
+            printf("%d, %d, %d, ",length, width, topo);
             for (int i = 0; i < metricTotal.size(); i++) {
                 printf("%0.3f, ", metricTotal[i]/numTrials);
                 metricTotal[i] = 0;
