@@ -303,6 +303,17 @@ void runDemo(int length, int width, Topology topology)
         metricValue.push_back(getMicroSecondDuration(start, end));
     }
     {
+        size_t n;
+
+        HIP_CHECK(hipGraphGetNodes(graph, nullptr, &n));
+        metricName.push_back("nodes");
+        metricValue.push_back(n);
+
+        HIP_CHECK(hipGraphGetEdges(graph, nullptr, nullptr, &n));
+        metricName.push_back("edges");
+        metricValue.push_back(n);
+    }
+    {
         auto start = getCpuTime();
         HIP_CHECK(hipGraphInstantiateWithFlags(&graphExec, graph, 0));
         auto end = getCpuTime();
