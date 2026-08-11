@@ -202,7 +202,7 @@ hipGraph_t createMeshGraph(unsigned int length, unsigned int width, Topology top
     HIP_CHECK(hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal));
 
     if (topology == Topology::MeshGraphSingleEntry) {
-        empty<<<1, 1, 0, stream[0]>>>(0);
+        empty<<<1, 1, 0, stream[0]>>>(kernelArg);
     }
 
     HIP_CHECK(hipEventRecord(event[0], stream[0]));
@@ -213,7 +213,7 @@ hipGraph_t createMeshGraph(unsigned int length, unsigned int width, Topology top
 
     for (unsigned int l {0}; l < length - 1; l++) {
         for (unsigned int w {0}; w < width; w++) {
-            empty<<<1, 1, 0, stream[w]>>>(0);
+            empty<<<1, 1, 0, stream[w]>>>(kernelArg);
             HIP_CHECK(hipEventRecord(event[w], stream[w]));
         }
 
@@ -226,13 +226,42 @@ hipGraph_t createMeshGraph(unsigned int length, unsigned int width, Topology top
     // last layer has special syncronization
     if (length >= 1) {
         for (unsigned int w {0}; w < width; w++) {
-            empty<<<1, 1, 0, stream[w]>>>(0);
+            empty<<<1, 1, 0, stream[w]>>>(kernelArg);
         }
 
         for (unsigned int w {1}; w < width; w ++) {
             HIP_CHECK(hipEventRecord(event[0], stream[w]));
             HIP_CHECK(hipStreamWaitEvent(stream[0], event[0]));
         }
+    }
+
+    HIP_CHECK(hipStreamEndCapture(stream[0], &graph));
+    return graph;
+}
+
+hipGraph_t createBinaryTree(unsigned int length, int kernelArg = 0)
+{
+    hipGraph_t graph;
+
+    HIP_CHECK(hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal));
+
+    for (unsigned int depth {0}; depth < length - 1; depth++) {
+        size_t offset = stream.size();
+        for (unsigned int i {0}; i < depth; i++) {
+            // the children of node i are i and i + offset
+            offset /= 2;
+
+            empty<<<1, 1, 0, stream[i]>>>(kernelArg);
+            HIP_CHECK(hipEventRecord(event[0], stream[i]));
+            //HIP_CHECK(hipStreamWaitEvent(stream[i], event[0]));
+            HIP_CHECK(hipStreamWaitEvent(stream[i + offset], event[0]));
+        }
+    }
+
+    for (unsigned int i {0}; i < length; i++) {
+        empty<<<1, 1, 0, stream[i]>>>(kernelArg);
+        HIP_CHECK(hipEventRecord(event[0], stream[i]));
+        HIP_CHECK(hipStreamWaitEvent(stream[0], event[0]));
     }
 
     HIP_CHECK(hipStreamEndCapture(stream[0], &graph));
@@ -252,7 +281,7 @@ hipGraph_t createGraph(unsigned int length, unsigned int width, Topology topolog
         case Topology::MeshGraphSingleEntry:
             return createMeshGraph(length, width, topology, kernelArg);
         case Topology::BinaryTree:
-            throw std::logic_error{"Not implemented yet"};
+            return createBinaryTree(length, kernelArg);
         default:
             throw std::logic_error{"Unreachable"};
     }
@@ -538,6 +567,10 @@ int main(int argc, char **argv)
     }
 
     auto topology{static_cast<Topology>(topo)};
+
+    if (topology == Topology::BinaryTree) {
+        width = 2 << (length - 1);
+    }
 
     hipGraph_t graph;
 
