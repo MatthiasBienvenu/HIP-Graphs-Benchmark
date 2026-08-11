@@ -291,9 +291,17 @@ std::vector<const char*> metricName;
 std::vector<float> metricValue;
 
 int counter2 = 0;
-void runDemo(hipGraph_t graph, int length, int width, Topology topology)
+void runDemo(int length, int width, Topology topology)
 {
+    hipGraph_t graph;
     hipGraphExec_t graphExec;
+    {
+        auto start = getCpuTime();
+        graph = createGraph(length, width, topology);
+        auto end = getCpuTime();
+        metricName.push_back("capture");
+        metricValue.push_back(getMicroSecondDuration(start, end));
+    }
     {
         auto start = getCpuTime();
         HIP_CHECK(hipGraphInstantiateWithFlags(&graphExec, graph, 0));
@@ -569,7 +577,7 @@ int main(int argc, char **argv)
     auto topology{static_cast<Topology>(topo)};
 
     if (topology == Topology::BinaryTree) {
-        width = 2 << (length - 1);
+        width = 2 << (maxLength - 1);
     }
 
     hipGraph_t graph;
@@ -611,12 +619,7 @@ int main(int argc, char **argv)
         }
         HIP_CHECK(hipStreamSynchronize(stream[0]));
 
-        auto start = getCpuTime();
-        graph = createGraph(length, width, topology);
-        auto end = getCpuTime();
-        metricValue.push_back(getMicroSecondDuration(start, end));
-        metricName.push_back("capture");
-        runDemo(graph, length, width, topology);
+        runDemo(length, width, topology);
     }
 
     if (outputFmt & 1) {
@@ -639,12 +642,8 @@ int main(int argc, char **argv)
         for (int i = 0; i < numTrials; i++) {
             metricName.clear();
             metricValue.clear();
-            auto start = getCpuTime();
-            graph = createGraph(length, width, topology);
-            auto end = getCpuTime();
-            metricValue.push_back(getMicroSecondDuration(start, end));
 
-            runDemo(graph, length, width, topology);
+            runDemo(length, width, topology);
 
             if (outputFmt & 2) {
                 printf("%d, %d, %d, ",length, width, topo);
