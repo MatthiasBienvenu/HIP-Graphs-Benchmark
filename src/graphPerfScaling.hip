@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <hip/hip_runtime.h>
 #include <iostream>
+#include <print>
 #include <stdexcept>
 #include <vector>
 #include <chrono>
@@ -245,20 +246,19 @@ hipGraph_t createBinaryTree(unsigned int length, int kernelArg = 0)
 
     HIP_CHECK(hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal));
 
+    size_t offset = stream.size();
     for (unsigned int depth {0}; depth < length - 1; depth++) {
-        size_t offset = stream.size();
-        for (unsigned int i {0}; i < depth; i++) {
-            // the children of node i are i and i + offset
-            offset /= 2;
-
+        size_t new_offset = offset / 2;
+        for (unsigned int i {0}; i < stream.size(); i += offset) {
+            // the children of node i are i and i + new_offset
             empty<<<1, 1, 0, stream[i]>>>(kernelArg);
             HIP_CHECK(hipEventRecord(event[0], stream[i]));
-            //HIP_CHECK(hipStreamWaitEvent(stream[i], event[0]));
-            HIP_CHECK(hipStreamWaitEvent(stream[i + offset], event[0]));
+            HIP_CHECK(hipStreamWaitEvent(stream[i + new_offset], event[0]));
         }
+        offset = new_offset;
     }
 
-    for (unsigned int i {0}; i < length; i++) {
+    for (unsigned int i {0}; i < stream.size(); i++) {
         empty<<<1, 1, 0, stream[i]>>>(kernelArg);
         HIP_CHECK(hipEventRecord(event[0], stream[i]));
         HIP_CHECK(hipStreamWaitEvent(stream[0], event[0]));
@@ -588,7 +588,7 @@ int main(int argc, char **argv)
     auto topology{static_cast<Topology>(topo)};
 
     if (topology == Topology::BinaryTree) {
-        width = 2 << (maxLength - 1);
+        width = 1 << (maxLength - 1);
     }
 
     hipGraph_t graph;
