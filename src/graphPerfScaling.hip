@@ -165,12 +165,8 @@ __global__ void postUploadAnnotation()
 {
 }
 
-hipGraph_t createParallelChain(int length, int width, Topology topology, int kernelArg)
+void runParallelChain(int length, int width, Topology topology, int kernelArg)
 {
-    hipGraph_t graph;
-
-    HIP_CHECK(hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal));
-
     if (topology == Topology::ParallelChainsSingleEntry) {
        empty<<<1,1,0,stream[0]>>>(kernelArg);
     }
@@ -190,18 +186,10 @@ hipGraph_t createParallelChain(int length, int width, Topology topology, int ker
         HIP_CHECK(hipEventRecord(event[0], stream[i]));
         HIP_CHECK(hipStreamWaitEvent(stream[0], event[0], 0));
     }
-
-
-    HIP_CHECK(hipStreamEndCapture(stream[0], &graph));
-    return graph;
 }
 
-hipGraph_t createMeshGraph(unsigned int length, unsigned int width, Topology topology, int kernelArg = 0)
+void runMeshGraph(unsigned int length, unsigned int width, Topology topology, int kernelArg = 0)
 {
-    hipGraph_t graph;
-
-    HIP_CHECK(hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal));
-
     if (topology == Topology::MeshGraphSingleEntry) {
         empty<<<1, 1, 0, stream[0]>>>(kernelArg);
     }
@@ -235,18 +223,12 @@ hipGraph_t createMeshGraph(unsigned int length, unsigned int width, Topology top
             HIP_CHECK(hipStreamWaitEvent(stream[0], event[0]));
         }
     }
-
-    HIP_CHECK(hipStreamEndCapture(stream[0], &graph));
-    return graph;
 }
 
-hipGraph_t createBinaryTree(unsigned int length, int kernelArg = 0)
+void runBinaryTree(unsigned int length, int kernelArg = 0)
 {
-    hipGraph_t graph;
-
-    HIP_CHECK(hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal));
-
     size_t offset = stream.size();
+
     for (unsigned int depth {0}; depth < length - 1; depth++) {
         size_t new_offset = offset / 2;
         for (unsigned int i {0}; i < stream.size(); i += offset) {
@@ -263,12 +245,9 @@ hipGraph_t createBinaryTree(unsigned int length, int kernelArg = 0)
         HIP_CHECK(hipEventRecord(event[0], stream[i]));
         HIP_CHECK(hipStreamWaitEvent(stream[0], event[0]));
     }
-
-    HIP_CHECK(hipStreamEndCapture(stream[0], &graph));
-    return graph;
 }
 
-hipGraph_t createGraph(unsigned int length, unsigned int width, Topology topology, int kernelArg = 0)
+void runGraphTopology(unsigned int length, unsigned int width, Topology topology, int kernelArg = 0)
 {
     RANGE_PUSH(__func__);
     RANGE("capture");
@@ -276,15 +255,28 @@ hipGraph_t createGraph(unsigned int length, unsigned int width, Topology topolog
     switch (topology) {
         case Topology::ParallelChains:
         case Topology::ParallelChainsSingleEntry:
-            return createParallelChain(length, width, topology, kernelArg);
+            runParallelChain(length, width, topology, kernelArg);
+            break;
         case Topology::MeshGraph:
         case Topology::MeshGraphSingleEntry:
-            return createMeshGraph(length, width, topology, kernelArg);
+            runMeshGraph(length, width, topology, kernelArg);
+            break;
         case Topology::BinaryTree:
-            return createBinaryTree(length, kernelArg);
+            runBinaryTree(length, kernelArg);
+            break;
         default:
             throw std::logic_error{"Unreachable"};
     }
+}
+
+hipGraph_t createGraph(unsigned int length, unsigned int width, Topology topology, int kernelArg = 0) {
+    hipGraph_t graph;
+
+    HIP_CHECK(hipStreamBeginCapture(stream[0], hipStreamCaptureModeGlobal));
+    runGraphTopology(length, width, topology, kernelArg);
+    HIP_CHECK(hipStreamEndCapture(stream[0], &graph));
+
+    return graph;
 }
 
 std::vector<const char*> metricName;
