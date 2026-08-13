@@ -9,6 +9,7 @@ DEFAULT_COLUMNS = [
     "instantiation",
     "first_launch_total",
     "repeat_launch_total",
+    "baseline_launch_total"
 ]
 
 
@@ -47,6 +48,8 @@ def parse_args():
 def load_means_stds(filename: str, columns: list[str], x_axis: str):
     df = pd.read_csv(filename, skipinitialspace=True).dropna(axis=1)
     df = df.drop(columns=["width", "pattern"])
+
+    print(df.columns)
 
     unknown = [c for c in columns if c not in df.columns]
     if unknown:
@@ -97,6 +100,7 @@ def main():
         ax.set_title(key)
         ax.set_xlabel(x_axis)
         ax.set_ylabel("microseconds")
+        ax.grid(color="grey", alpha=0.2)
         ax.legend()
 
     plt.show()

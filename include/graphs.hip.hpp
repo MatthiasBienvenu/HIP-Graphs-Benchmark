@@ -25,5 +25,5 @@ enum class Topology {
 };
 
 __global__ void empty(int unused);
-
 hipGraph_t createGraph(unsigned int length, unsigned int width, Topology topology, int kernelArg = 0);
+void runGraphTopology(unsigned int length, unsigned int width, Topology topology, int kernelArg);

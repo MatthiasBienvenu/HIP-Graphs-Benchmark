@@ -161,6 +161,7 @@ void runDemo(int length, int width, Topology topology)
 {
     hipGraph_t graph;
     hipGraphExec_t graphExec;
+    long long maxTimeoutNanoSeconds;
     {
         auto start = getCpuTime();
         graph = createGraph(length, width, topology);
@@ -169,30 +170,75 @@ void runDemo(int length, int width, Topology topology)
         metricValue.push_back(getMicroSecondDuration(start, end));
     }
     {
-        size_t n;
+        size_t nodes;
+        size_t edges;
 
-        HIP_CHECK(hipGraphGetNodes(graph, nullptr, &n));
+        HIP_CHECK(hipGraphGetNodes(graph, nullptr, &nodes));
         metricName.push_back("nodes");
-        metricValue.push_back(n);
+        metricValue.push_back(nodes);
 
-        HIP_CHECK(hipGraphGetEdges(graph, nullptr, nullptr, &n));
+        HIP_CHECK(hipGraphGetEdges(graph, nullptr, nullptr, &edges));
         metricName.push_back("edges");
-        metricValue.push_back(n);
+        metricValue.push_back(edges);
+
+        maxTimeoutNanoSeconds = 20000 + 5000 * (nodes + edges);
+    }
+    {
+        RANGE("baseline stream execution");
+        auto start = getCpuTime();
+
+        // Launch topology directly (no capture)
+        runGraphTopology(length, width, topology, 0);
+        auto apiReturn = getCpuTime();
+
+        HIP_CHECK(hipStreamSynchronize(stream[0]));
+        auto streamSync = getCpuTime();
+
+        metricName.push_back("baseline_launch_api");
+        metricValue.push_back(getMicroSecondDuration(start, apiReturn));
+        metricName.push_back("baseline_launch_total");
+        metricValue.push_back(getMicroSecondDuration(start, streamSync));
+    }
+    {
+        RANGE("baseline device execution in busy stream");
+        waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
+
+        HIP_CHECK(hipEventRecord(timingEvent[0], stream[0]));
+
+        // launch topology directly into the blocked stream
+        runGraphTopology(length, width, topology, 0);
+
+        HIP_CHECK(hipEventRecord(timingEvent[1], stream[0]));
+
+        // release the latch so execution begins
+        hostData->latch = 1;
+        HIP_CHECK(hipStreamSynchronize(stream[0]));
+
+        metricName.push_back("baseline_launch_device");
+        metricValue.push_back(getAsyncMicroSecondDuration(timingEvent[0], timingEvent[1]));
+
+        hostData->latch = 0;
+        hostData->timeoutDetected = 0;
     }
     {
         auto start = getCpuTime();
         HIP_CHECK(hipGraphInstantiateWithFlags(&graphExec, graph, 0));
         auto end = getCpuTime();
+
         metricName.push_back("instantiation");
         metricValue.push_back(getMicroSecondDuration(start, end));
     }
     {
         RANGE("launch including upload");
+
         auto start = getCpuTime();
+
         HIP_CHECK(hipGraphLaunch(graphExec, stream[0]));
         auto apiReturn = getCpuTime();
+
         HIP_CHECK(hipStreamSynchronize(stream[0]));
         auto streamSync = getCpuTime();
+
         metricName.push_back("first_launch_api");
         metricValue.push_back(getMicroSecondDuration(start, apiReturn));
         metricName.push_back("first_launch_total");
@@ -200,11 +246,15 @@ void runDemo(int length, int width, Topology topology)
     }
     {
         RANGE("repeat lauch in empty stream");
+
         auto start = getCpuTime();
+
         HIP_CHECK(hipGraphLaunch(graphExec, stream[0]));
         auto apiReturn = getCpuTime();
+
         HIP_CHECK(hipStreamSynchronize(stream[0]));
         auto streamSync = getCpuTime();
+
         metricName.push_back("repeat_launch_api");
         metricValue.push_back(getMicroSecondDuration(start, apiReturn));
         metricName.push_back("repeat_launch_total");
@@ -215,7 +265,6 @@ void runDemo(int length, int width, Topology topology)
         HIP_CHECK(hipGraphExecDestroy(graphExec));
         HIP_CHECK(hipGraphInstantiateWithFlags(&graphExec, graph, 0));
 
-        long long maxTimeoutNanoSeconds = 4000 + 500*length*width;
         waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
 
         RANGE("launch including upload in busy stream");
@@ -235,7 +284,6 @@ void runDemo(int length, int width, Topology topology)
     }
     {
         RANGE("repeat lauch in busy stream");
-        long long maxTimeoutNanoSeconds = 4000 + 500*length*width;
         waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
         HIP_CHECK(hipEventRecord(timingEvent[0], stream[0]));
         HIP_CHECK(hipGraphLaunch(graphExec, stream[0]));
@@ -255,9 +303,7 @@ void runDemo(int length, int width, Topology topology)
         // re-instantiating the exec to provide upload with work to do.
         HIP_CHECK(hipGraphExecDestroy(graphExec));
         HIP_CHECK(hipGraphInstantiateWithFlags(&graphExec, graph, 0));
-        long long maxTimeoutNanoSeconds = 4000 + 1000*length*width;
         waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected2, &hostData->timeElapsed2, &hostData->latch2);
-        maxTimeoutNanoSeconds = 2000 + 500*length*width;
         waitWithTimeout<<<1,1,0,stream[1]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
 
         RANGE("uploading a graph off of the critical path");
@@ -321,7 +367,6 @@ void runDemo(int length, int width, Topology topology)
         HIP_CHECK(hipGraphExecKernelNodeSetParams(graphExec, node, &params));
         auto apiEnd = getCpuTime();
 
-        long long maxTimeoutNanoSeconds = 4000 + 500 * length * width;
         waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
 
         HIP_CHECK(hipEventRecord(timingEvent[0], stream[0]));
@@ -360,7 +405,6 @@ void runDemo(int length, int width, Topology topology)
         HIP_CHECK(hipGraphExecUpdate(graphExec, graph2, &errNode, &result));
         auto apiEnd = getCpuTime();
 
-        long long maxTimeoutNanoSeconds = 4000 + 500 * length * width;
         waitWithTimeout<<<1,1,0,stream[0]>>>(maxTimeoutNanoSeconds, &hostData->timeoutDetected, &hostData->timeElapsed, &hostData->latch);
 
         HIP_CHECK(hipEventRecord(timingEvent[0], stream[0]));
