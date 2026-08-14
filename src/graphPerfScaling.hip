@@ -326,9 +326,9 @@ void runDemo(int length, int width, Topology topology)
         hostData->latch2 = 1; // release the work
         HIP_CHECK(hipStreamSynchronize(stream[0]));
 
-        metricName.push_back("upload_api_time");
+        metricName.push_back("upload_api");
         metricValue.push_back(getMicroSecondDuration(start, apiReturn));
-        metricName.push_back("upload_device_time");
+        metricName.push_back("upload_device");
         metricValue.push_back(getAsyncMicroSecondDuration(timingEvent[0], timingEvent[1]));
         metricName.push_back("blockingKernelTimeoutDetected");
         metricValue.push_back(hostData->timeoutDetected);
