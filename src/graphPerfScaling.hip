@@ -35,11 +35,8 @@
 //#define USE_ROCTX
 
 #include <cassert>
-#include <cmath>
 #include <cstdio>
 #include <hip/hip_runtime.h>
-#include <iostream>
-#include <print>
 #include <vector>
 #include <chrono>
 #include "graphs.hip.hpp"
