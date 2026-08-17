@@ -47,19 +47,6 @@
 __constant__ int d_wallClockRateKHz;
 #endif
 
-#define HIP_CHECK(expr)                                      \
-    do {                                                     \
-        hipError_t err = (expr);                             \
-        if (err != hipSuccess) {                             \
-            throw std::runtime_error(std::format(            \
-                "{}:{}: {} failed: {}",                      \
-                __FILE__,                                    \
-                __LINE__,                                    \
-                #expr,                                       \
-                hipGetErrorString(err)));                    \
-        }                                                    \
-    } while (false)
-
 typedef volatile int LatchType;
 
 std::chrono::time_point<std::chrono::high_resolution_clock> getCpuTime()
