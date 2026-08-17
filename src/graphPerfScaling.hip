@@ -26,7 +26,10 @@
  */
 
 /*
- * This is a simple application showing the performance characteristics of cudaGraphs.
+ * This file is a port of NVIDIA's original implementation to AMD HIP,
+ * with additional modifications and extensions.
+ *
+ * This project is not affiliated with or endorsed by NVIDIA Corporation.
  */
 
 //#define USE_ROCTX
