@@ -14,7 +14,7 @@ The project is organized as follows:
 - **`include/`**: Headers
 - **`results/`**: All the data collected and details on the machines used
 - **`scripts/`**: Scripts to launch the benchmark and display beautiful graphs
-- **`apptainer/`**: Def files for a container running cuda 12.9 that can compile and run HIP programs
+- **`hpc/`**: Def files for apptainer and OAR jobs
 
 ---
 
@@ -36,21 +36,21 @@ If you don't find the packages you want you should probably check the [AMD ROCM 
 
 For AMD you can just install the ROCM SDK using pip in a venv since ROCM 7 so you can still follow [this guide](https://rocm.docs.amd.com/en/latest/install/rocm.html).
 
-For NVIDIA, you cannot just use pip but if you have _apptainer_ installed, you can use [](apptainer/hip-cuda-12.9.def).
+For NVIDIA, you cannot just use pip but if you have _apptainer_ installed, you can use [](hpc/hip-cuda-12.9.def).
 
 ```
-apptainer build apptainer/hip-cuda-12.9.sif apptainer/hip-cuda-12.9.def
-apptainer run --nv apptainer/hip-cuda-12.9.sif
+apptainer build hpc/hip-cuda-12.9.sif hpc/hip-cuda-12.9.def
+apptainer run --nv hpc/hip-cuda-12.9.sif
 ```
 
 If you don't have the rights the build the container, you can build it on your local machine and then `scp` the `.sif` file to the remote cluster. If you don't have the right the run a `.sif` container on the cluster then you can still build the container with the `--sandbox` option which essentially builds it as a directory.
 
 ```
 # On the local machine
-apptainer build --sandbox apptainer/hip-cuda-12.9 apptainer/hip-cuda-12.9.def
+apptainer build --sandbox hpc/hip-cuda-12.9 hpc/hip-cuda-12.9.def
 
 # On the remote cluster
-apptainer run --nv apptainer/hip-cuda-12.9
+apptainer run --nv hpc/hip-cuda-12.9
 ```
 
 ### Building the project

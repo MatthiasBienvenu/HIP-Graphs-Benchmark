@@ -23,36 +23,37 @@
 # 	4: BinaryTree of depth <length> (the number of nodes is n*(n+1)/2). Width will be ignored.
 
 OUTPUT_FMT=3
-NUM_TRIALS=10
-STRIDE=1
+NUM_TRIALS=100
+STRIDE=10
 
 echo "Testing single line graph"
 
-LENGTH=1
+LENGTH=10
 WIDTH=1
 PATTERN=0
-MAX_LENGTH=100
+MAX_LENGTH=2000
 ./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >straight-line.csv
 
 echo "Testing parallel lines graph"
 
-LENGTH=1
+LENGTH=10
 WIDTH=4
 PATTERN=0
-MAX_LENGTH=100
+MAX_LENGTH=2000
 ./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >${WIDTH}-parallel-lines.csv
 
 echo "Testing mesh graph"
 
-LENGTH=1
+LENGTH=10
 WIDTH=10
 PATTERN=2
-MAX_LENGTH=40
+MAX_LENGTH=100
 ./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >${WIDTH}-mesh-graph.csv
 
 echo "Testing bintree graph"
 
 LENGTH=1
+STRIDE=1
 PATTERN=4
-MAX_LENGTH=10
+MAX_LENGTH=15
 ./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >bin-tree.csv
