@@ -1,18 +1,18 @@
 #pragma once
 #include <hip/hip_runtime.h>
-#include <format>
-#include <stdexcept>
+#include <iostream>
+#include <cstdlib>
 
 #define HIP_CHECK(expr)                                      \
     do {                                                     \
         hipError_t err = (expr);                             \
         if (err != hipSuccess) {                             \
-            throw std::runtime_error(std::format(            \
-                "{}:{}: {} failed: {}",                      \
-                __FILE__,                                    \
-                __LINE__,                                    \
-                #expr,                                       \
-                hipGetErrorString(err)));                    \
+            std::cerr                                        \
+                << __FILE__ << ":"                           \
+                << __LINE__ << ": "                          \
+                << (#expr) << " failed: "                    \
+                << hipGetErrorString(err);                   \
+            abort();                                        \
         }                                                    \
     } while (false)
 
