@@ -70,11 +70,12 @@ void runMeshGraph(unsigned int length, unsigned int width, Topology topology, in
 
 void runBinaryTree(unsigned int length, int kernelArg)
 {
-    size_t offset = stream.size();
+    size_t width = 1 << (length - 1); // number of streams used on the last layer
+    size_t offset = width;
 
     for (unsigned int depth {0}; depth < length - 1; depth++) {
         size_t new_offset = offset / 2;
-        for (unsigned int i {0}; i < stream.size(); i += offset) {
+        for (unsigned int i {0}; i < width; i += offset) {
             // the children of node i are i and i + new_offset
             empty<<<1, 1, 0, stream[i]>>>(kernelArg);
             HIP_CHECK(hipEventRecord(event[0], stream[i]));
@@ -83,7 +84,7 @@ void runBinaryTree(unsigned int length, int kernelArg)
         offset = new_offset;
     }
 
-    for (unsigned int i {0}; i < stream.size(); i++) {
+    for (unsigned int i {0}; i < width; i++) {
         empty<<<1, 1, 0, stream[i]>>>(kernelArg);
         HIP_CHECK(hipEventRecord(event[0], stream[i]));
         HIP_CHECK(hipStreamWaitEvent(stream[0], event[0], 0));

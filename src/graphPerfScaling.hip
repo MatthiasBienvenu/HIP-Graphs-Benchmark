@@ -488,8 +488,6 @@ int main(int argc, char **argv)
         width = 1 << (maxLength - 1);
     }
 
-    hipGraph_t graph;
-
     HIP_CHECK(hipFree(0));
 
     #ifdef __HIP_PLATFORM_AMD__
