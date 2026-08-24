@@ -12,7 +12,7 @@
                 << __LINE__ << ": "                          \
                 << (#expr) << " failed: "                    \
                 << hipGetErrorString(err);                   \
-            abort();                                        \
+            abort();                                         \
         }                                                    \
     } while (false)
 

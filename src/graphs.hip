@@ -1,5 +1,6 @@
 #include <hip/hip_runtime.h>
 #include "graphs.hip.hpp"
+#include <vector>
 
 extern std::vector<hipEvent_t> event;
 extern std::vector<hipStream_t> stream;
@@ -62,7 +63,7 @@ void runMeshGraph(unsigned int length, unsigned int width, Topology topology, in
 
         for (unsigned int w {1}; w < width; w ++) {
             HIP_CHECK(hipEventRecord(event[0], stream[w]));
-            HIP_CHECK(hipStreamWaitEvent(stream[0], event[0]));
+            HIP_CHECK(hipStreamWaitEvent(stream[0], event[0], 0));
         }
     }
 }
@@ -77,7 +78,7 @@ void runBinaryTree(unsigned int length, int kernelArg)
             // the children of node i are i and i + new_offset
             empty<<<1, 1, 0, stream[i]>>>(kernelArg);
             HIP_CHECK(hipEventRecord(event[0], stream[i]));
-            HIP_CHECK(hipStreamWaitEvent(stream[i + new_offset], event[0]));
+            HIP_CHECK(hipStreamWaitEvent(stream[i + new_offset], event[0], 0));
         }
         offset = new_offset;
     }
@@ -85,7 +86,7 @@ void runBinaryTree(unsigned int length, int kernelArg)
     for (unsigned int i {0}; i < stream.size(); i++) {
         empty<<<1, 1, 0, stream[i]>>>(kernelArg);
         HIP_CHECK(hipEventRecord(event[0], stream[i]));
-        HIP_CHECK(hipStreamWaitEvent(stream[0], event[0]));
+        HIP_CHECK(hipStreamWaitEvent(stream[0], event[0], 0));
     }
 }
 

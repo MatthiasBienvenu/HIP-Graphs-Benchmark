@@ -10,7 +10,8 @@ From: nvidia/cuda:12.9.2-devel-ubuntu24.04
     apt-get install -y --no-install-recommends \
         wget \
         gnupg \
-        equivs
+        equivs \
+        cmake
 
     wget https://repo.radeon.com/rocm/rocm.gpg.key
     gpg --dearmor -o /usr/share/keyrings/rocm.gpg rocm.gpg.key
