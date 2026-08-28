@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #OAR -q default
-#OAR -l host=1/gpu=1,walltime=1:00:00
+#OAR -l host=1/gpu=1,walltime=3:00:00
 #OAR -p mi210
 #OAR -O OAR_%jobid%.out
 #OAR -E OAR_%jobid%.err
@@ -12,4 +12,6 @@ source ~/.venv-mi210/bin/activate
 
 cd ~/HIP-Graphs-Benchmark/build
 
-LD_LIBRARY_PATH=~/.venv-mi210/lib/python3.10/site-packages/_rocm_sdk_devel/lib/ ../scripts/launch-bench.sh
+amd-smi
+
+LD_LIBRARY_PATH=~/.venv-mi210/lib/python3.10/site-packages/_rocm_sdk_devel/lib/ CSV_PREFIX="mi210" ../scripts/launch-bench.sh

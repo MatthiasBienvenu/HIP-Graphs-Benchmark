@@ -32,7 +32,7 @@ LENGTH=10
 WIDTH=1
 PATTERN=0
 MAX_LENGTH=2000
-./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >straight-line.csv
+./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >"${CSV_PREFIX}_straight-line.csv"
 
 echo "Testing parallel lines graph"
 
@@ -40,7 +40,7 @@ LENGTH=10
 WIDTH=4
 PATTERN=0
 MAX_LENGTH=2000
-./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >${WIDTH}-parallel-lines.csv
+./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >"${CSV_PREFIX}_${WIDTH}-parallel-lines.csv"
 
 echo "Testing mesh graph"
 
@@ -48,7 +48,7 @@ LENGTH=10
 WIDTH=10
 PATTERN=2
 MAX_LENGTH=100
-./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >${WIDTH}-mesh-graph.csv
+./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >"${CSV_PREFIX}_${WIDTH}-mesh-graph.csv"
 
 echo "Testing bintree graph"
 
@@ -56,4 +56,4 @@ LENGTH=1
 STRIDE=1
 PATTERN=4
 MAX_LENGTH=15
-./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >bin-tree.csv
+./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >"${CSV_PREFIX}_bin-tree.csv"
