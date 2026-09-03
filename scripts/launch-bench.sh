@@ -55,5 +55,5 @@ echo "Testing bintree graph"
 LENGTH=1
 STRIDE=1
 PATTERN=4
-MAX_LENGTH=15
+MAX_LENGTH=10
 ./graphPerfScaling "$OUTPUT_FMT" "$NUM_TRIALS" "$LENGTH" "$WIDTH" "$PATTERN" "$STRIDE" "$MAX_LENGTH" >"${CSV_PREFIX}_bin-tree.csv"
